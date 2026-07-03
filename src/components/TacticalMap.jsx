@@ -1,4 +1,3 @@
-
 import React, { useRef, useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 
@@ -17,7 +16,9 @@ const THEATER_MAPS = [
 
 export default function TacticalMap() {
   const canvasRef = useRef(null);
+  const reactorCanvasRef = useRef(null); // Reference for the sandbox visualizer
   const animationRef = useRef(null);
+  const reactorAnimationRef = useRef(null); // Reference for the sandbox particle loop
   
   const [markers, setMarkers] = useState([]);
   const [lines, setLines] = useState([]); 
@@ -50,6 +51,7 @@ export default function TacticalMap() {
     drawCanvasMatrix();
   }, [markers, lines, currentLine, activeTheater, isSimulating, simProgress, showHeatmap, globalHeatmapPoints]);
 
+  // Hook for Loop Animation Playback
   useEffect(() => {
     if (!isSimulating) return;
     const updateAnimationFrame = () => {
@@ -67,6 +69,78 @@ export default function TacticalMap() {
     return () => cancelAnimationFrame(animationRef.current);
   }, [isSimulating, selectedHero]);
 
+  // --- RECT REACTOR ANIMATION LOOP ---
+  useEffect(() => {
+    const canvas = reactorCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let particles = [];
+    
+    const pA = HERO_DATABASE.find(h => h.id === fusionParentA);
+    const pB = HERO_DATABASE.find(h => h.id === fusionParentB);
+
+    const runReactorLoop = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Spawn particles from both parent nodes flying into the center core
+      if (particles.length < 40) {
+        particles.push({
+          x: Math.random() > 0.5 ? 40 : canvas.width - 40,
+          y: canvas.height / 2 + (Math.random() * 20 - 10),
+          targetX: canvas.width / 2,
+          targetY: canvas.height / 2,
+          color: Math.random() > 0.5 ? pA.iconColor : pB.iconColor,
+          size: Math.random() * 3 + 1,
+          speed: Math.random() * 2 + 1
+        });
+      }
+
+      particles.forEach((p, i) => {
+        const dx = p.targetX - p.x;
+        const dy = p.targetY - p.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist < 4) {
+          particles.splice(i, 1); // Absorbed into core energy matrix
+        } else {
+          p.x += (dx / dist) * p.speed;
+          p.y += (dy / dist) * p.speed;
+          
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      });
+
+      // Render Central Blended Energy Core Ring
+      ctx.save();
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = pA.iconColor;
+      ctx.strokeStyle = pA.iconColor;
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(canvas.width / 2, canvas.height / 2, 25, 0, 2 * Math.PI); ctx.stroke();
+
+      ctx.shadowColor = pB.iconColor;
+      ctx.strokeStyle = pB.iconColor;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(canvas.width / 2, canvas.height / 2, 20 + Math.sin(Date.now() / 100) * 3, 0, 2 * Math.PI); ctx.stroke();
+      ctx.restore();
+
+      // Parent Node Terminals Indicators
+      ctx.fillStyle = pA.iconColor;
+      ctx.beginPath(); ctx.arc(40, canvas.height / 2, 12, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillStyle = pB.iconColor;
+      ctx.beginPath(); ctx.arc(canvas.width - 40, canvas.height / 2, 12, 0, 2 * Math.PI); ctx.fill();
+
+      reactorAnimationRef.current = requestAnimationFrame(runReactorLoop);
+    };
+
+    reactorAnimationRef.current = requestAnimationFrame(runReactorLoop);
+    return () => cancelAnimationFrame(reactorAnimationRef.current);
+  }, [fusionParentA, fusionParentB]);
+
+  // Realtime Listeners Sync Hooks
   useEffect(() => {
     const channel = supabase
       .channel('schema-db-changes')
@@ -97,19 +171,14 @@ export default function TacticalMap() {
   }, [activeTheater]);
 
   useEffect(() => {
-    if (showHeatmap) {
-      fetchGlobalAnalytics();
-    }
+    if (showHeatmap) fetchGlobalAnalytics();
   }, [showHeatmap, activeTheater]);
 
   const fetchCloudData = async () => {
     const nodeRes = await supabase.from('tactical_nodes').select('*').eq('theater_id', activeTheater.id);
     if (nodeRes.data) {
-      setMarkers(nodeRes.data.map(row => ({
-        id: row.id, x: row.x, y: row.y, heroName: row.hero_name, color: row.color
-      })));
+      setMarkers(nodeRes.data.map(row => ({ id: row.id, x: row.x, y: row.y, heroName: row.hero_name, color: row.color })));
     }
-
     const pathRes = await supabase.from('tactical_paths').select('*').eq('theater_id', activeTheater.id);
     if (pathRes.data) {
       setLines(pathRes.data.map(row => {
@@ -124,128 +193,27 @@ export default function TacticalMap() {
     if (data) setGlobalHeatmapPoints(data);
   };
 
-  const getXYAtProgress = (points, progress) => {
-    if (!points || points.length === 0) return null;
-    if (points.length === 1) return points[0];
-    const totalSegments = points.length - 1;
-    const targetSegment = Math.min(Math.floor(progress * totalSegments), totalSegments - 1);
-    const segmentStart = points[targetSegment];
-    const segmentEnd = points[targetSegment + 1];
-    const segmentProgress = (progress * totalSegments) - targetSegment;
-    return {
-      x: segmentStart.x + (segmentEnd.x - segmentStart.x) * segmentProgress,
-      y: segmentStart.y + (segmentEnd.y - segmentStart.y) * segmentProgress
-    };
-  };
-
-  const drawCanvasMatrix = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    
-    ctx.fillStyle = activeTheater.bgColor;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = activeTheater.gridColor;
-    ctx.lineWidth = 1;
-    for (let x = 0; x < canvas.width; x += 40) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-    }
-    for (let y = 0; y < canvas.height; y += 40) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-    }
-
-    if (showHeatmap) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-      globalHeatmapPoints.forEach((pt) => {
-        const gradient = ctx.createRadialGradient(pt.x, pt.y, 2, pt.x, pt.y, 40);
-        gradient.addColorStop(0, 'rgba(255, 30, 30, 0.6)');   
-        gradient.addColorStop(0.5, 'rgba(255, 140, 0, 0.25)'); 
-        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');        
-        ctx.fillStyle = gradient;
-        ctx.beginPath(); ctx.arc(pt.x, pt.y, 40, 0, 2 * Math.PI); ctx.fill();
-      });
-      ctx.restore();
-    }
-
-    ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    const drawPath = (points, strokeColor) => {
-      if (!points || points.length < 2) return;
-      ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-      ctx.strokeStyle = strokeColor; ctx.stroke();
-    };
-
-    ctx.shadowBlur = 8;
-    lines.forEach(line => drawPath(line.points, '#646cff'));
-    if (currentLine.length > 0) drawPath(currentLine, '#ff3333');
-    ctx.shadowBlur = 0; 
-
-    let dynamicMovingHeroPos = null;
-    if (isSimulating && lines.length > 0) {
-      const activePathPoints = lines[lines.length - 1].points;
-      dynamicMovingHeroPos = getXYAtProgress(activePathPoints, simProgress);
-    }
-
-    markers.forEach((marker) => {
-      const isThisHeroSimulating = isSimulating && marker.heroName === selectedHero.name;
-      const renderX = isThisHeroSimulating && dynamicMovingHeroPos ? dynamicMovingHeroPos.x : marker.x;
-      const renderY = isThisHeroSimulating && dynamicMovingHeroPos ? dynamicMovingHeroPos.y : marker.y;
-
-      ctx.fillStyle = marker.color;
-      ctx.shadowBlur = isThisHeroSimulating ? 24 : 12; 
-      ctx.shadowColor = marker.color;
-      
-      ctx.beginPath(); 
-      ctx.arc(renderX, renderY, isThisHeroSimulating ? 13 : 10, 0, 2 * Math.PI); 
-      ctx.fill();
-      
-      if (isThisHeroSimulating) {
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-
-      ctx.shadowBlur = 0; 
-      ctx.fillStyle = isThisHeroSimulating ? '#000' : '#fff';
-      ctx.font = 'bold 9px sans-serif'; 
-      ctx.textAlign = 'center';
-      ctx.fillText(marker.heroName.substring(0, 2).toUpperCase(), renderX, renderY + 3);
-    });
-  };
-
-  // FIX: Robust native coordinate tracker that accurately extracts desktop client OR mobile finger bounds
   const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    
-    // Abstract client position based on whether it is a touch event or standard click
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
-    return {
-      x: Math.round(clientX - rect.left),
-      y: Math.round(clientY - rect.top)
-    };
+    return { x: Math.round(clientX - rect.left), y: Math.round(clientY - rect.top) };
   };
 
   const handleStartAction = async (coords) => {
     if (isSimulating) return;
-
     if (toolMode === 'draw') {
-      setIsDragging(true);
-      setCurrentLine([coords]);
+      setIsDragging(true); setCurrentLine([coords]);
     } else {
       const clickedNode = markers.find(m => Math.hypot(m.x - coords.x, m.y - coords.y) < 15);
       if (clickedNode) {
-        setIsDragging(true);
-        setDraggedNodeId(clickedNode.id);
+        setIsDragging(true); setDraggedNodeId(clickedNode.id);
       } else {
         const newNodeData = { x: coords.x, y: coords.y, hero_name: selectedHero.name, color: selectedHero.iconColor, theater_id: activeTheater.id };
         const { data } = await supabase.from('tactical_nodes').insert([newNodeData]).select();
         await supabase.from('global_analytics_logs').insert([{ theater_id: activeTheater.id, x: coords.x, y: coords.y }]);
-
         if (data) {
           setMarkers([...markers, { id: data[0].id, x: data[0].x, y: data[0].y, heroName: data[0].hero_name, color: data[0].color }]);
           if (showHeatmap) fetchGlobalAnalytics();
@@ -270,7 +238,6 @@ export default function TacticalMap() {
       if (currentLine.length > 1) {
         const serializedStringifiedPoints = JSON.stringify(currentLine);
         const { data } = await supabase.from('tactical_paths').insert([{ theater_id: activeTheater.id, points: serializedStringifiedPoints }]).select();
-
         if (data) {
           const parsedPoints = typeof data[0].points === 'string' ? JSON.parse(data[0].points) : data[0].points;
           setLines([...lines, { id: data[0].id, points: parsedPoints }]);
@@ -290,23 +257,56 @@ export default function TacticalMap() {
 
   const startPlaybackSimulation = () => {
     const isHeroPlaced = markers.some(m => m.heroName === selectedHero.name);
-    if (lines.length === 0) {
-      alert("Please draw a path line first!");
-      return;
-    }
-    if (!isHeroPlaced) {
-      alert(`Place ${selectedHero.name} onto the canvas grid before initiating simulation!`);
-      return;
-    }
+    if (lines.length === 0) { alert("Please draw a path line first!"); return; }
+    if (!isHeroPlaced) { alert(`Place ${selectedHero.name} onto the canvas grid before initiating simulation!`); return; }
     setSimProgress(0); setIsSimulating(true);
   };
 
   const calculateFusion = () => {
-    const pA = HERO_DATABASE.find(h => h.id === fusionParentA); const pB = HERO_DATABASE.find(h => h.id === fusionParentB);
+    const pA = HERO_DATABASE.find(h => h.id === fusionParentA); 
+    const pB = HERO_DATABASE.find(h => h.id === fusionParentB);
+    
+    // Custom logic mapping unique combined strings for fused baseline tactical descriptors
+    let customAbility = `${pA.ability.split(' ')[0]} ${pB.ability.split(' ')[1] || 'Pulse'}`;
+    if (pA.id === pB.id) customAbility = `Overcharged ${pA.ability}`;
+
     return {
       name: `${pA.name.substring(0, 4)}-${pB.name.substring(pB.name.length - 4)} Core`,
-      health: Math.round((pA.health + pB.health) / 2), speed: ((pA.speed + pB.speed) / 2).toFixed(1)
+      health: Math.round((pA.health + pB.health) / 2), 
+      speed: ((pA.speed + pB.speed) / 2).toFixed(1),
+      ability: customAbility
     };
+  };
+
+  const drawCanvasMatrix = () => {
+    const canvas = canvasRef.current; if (!canvas) return; const ctx = canvas.getContext('2d');
+    ctx.fillStyle = activeTheater.bgColor; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = activeTheater.gridColor; ctx.lineWidth = 1;
+    for (let x = 0; x < canvas.width; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
+    for (let y = 0; y < canvas.height; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
+    if (showHeatmap) {
+      ctx.save(); ctx.globalCompositeOperation = 'screen';
+      globalHeatmapPoints.forEach((pt) => {
+        const gradient = ctx.createRadialGradient(pt.x, pt.y, 2, pt.x, pt.y, 40);
+        gradient.addColorStop(0, 'rgba(255, 30, 30, 0.6)'); gradient.addColorStop(0.5, 'rgba(255, 140, 0, 0.25)'); gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');        
+        ctx.fillStyle = gradient; ctx.beginPath(); ctx.arc(pt.x, pt.y, 40, 0, 2 * Math.PI); ctx.fill();
+      });
+      ctx.restore();
+    }
+    ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    lines.forEach(line => { if (line.points && line.points.length >= 2) { ctx.beginPath(); ctx.moveTo(line.points[0].x, line.points[0].y); line.points.forEach(p => ctx.lineTo(p.x, p.y)); ctx.strokeStyle = '#646cff'; ctx.stroke(); } });
+    if (currentLine.length > 0) { ctx.beginPath(); ctx.moveTo(currentLine[0].x, currentLine[0].y); currentLine.forEach(p => ctx.lineTo(p.x, p.y)); ctx.strokeStyle = '#ff3333'; ctx.stroke(); }
+    let dynamicMovingHeroPos = null;
+    if (isSimulating && lines.length > 0) { dynamicMovingHeroPos = getXYAtProgress(lines[lines.length - 1].points, simProgress); }
+    markers.forEach((marker) => {
+      const isThisHeroSimulating = isSimulating && marker.heroName === selectedHero.name;
+      const renderX = isThisHeroSimulating && dynamicMovingHeroPos ? dynamicMovingHeroPos.x : marker.x;
+      const renderY = isThisHeroSimulating && dynamicMovingHeroPos ? dynamicMovingHeroPos.y : marker.y;
+      ctx.fillStyle = marker.color; ctx.shadowBlur = isThisHeroSimulating ? 24 : 12; ctx.shadowColor = marker.color;
+      ctx.beginPath(); ctx.arc(renderX, renderY, isThisHeroSimulating ? 13 : 10, 0, 2 * Math.PI); ctx.fill();
+      if (isThisHeroSimulating) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+      ctx.shadowBlur = 0; ctx.fillStyle = isThisHeroSimulating ? '#000' : '#fff'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(marker.heroName.substring(0, 2).toUpperCase(), renderX, renderY + 3);
+    });
   };
 
   return (
@@ -347,51 +347,41 @@ export default function TacticalMap() {
           ))}
         </div>
 
-        {/* Master Cross-Platform Event Interface */}
         <canvas 
-          ref={canvasRef} 
-          width={600} 
-          height={350} 
-          
-          onMouseDown={(e) => handleStartAction(getCanvasCoords(e))} 
-          onMouseMove={(e) => handleMoveAction(getCanvasCoords(e))} 
-          onMouseUp={handleEndAction} 
-          onMouseLeave={handleEndAction}
-          
-          onTouchStart={(e) => {
-            e.preventDefault(); 
-            handleStartAction(getCanvasCoords(e));
-          }}
-          onTouchMove={(e) => {
-            e.preventDefault();
-            handleMoveAction(getCanvasCoords(e));
-          }}
-          onTouchEnd={(e) => {
-            e.preventDefault();
-            handleEndAction();
-          }}
-          
-          style={{ 
-            border: '2px solid #444', 
-            borderRadius: '4px', 
-            cursor: isSimulating ? 'wait' : (toolMode === 'draw' ? 'brush' : 'crosshair'), 
-            display: 'block', 
-            margin: '0 auto',
-            touchAction: 'none' 
-          }} 
+          ref={canvasRef} width={600} height={350} 
+          onMouseDown={(e) => handleStartAction(getCanvasCoords(e))} onMouseMove={(e) => handleMoveAction(getCanvasCoords(e))} onMouseUp={handleEndAction} onMouseLeave={handleEndAction}
+          onTouchStart={(e) => { e.preventDefault(); handleStartAction(getCanvasCoords(e)); }} onTouchMove={(e) => { e.preventDefault(); handleMoveAction(getCanvasCoords(e)); }} onTouchEnd={(e) => { e.preventDefault(); handleEndAction(); }}
+          style={{ border: '2px solid #444', borderRadius: '4px', cursor: isSimulating ? 'wait' : (toolMode === 'draw' ? 'brush' : 'crosshair'), display: 'block', margin: '0 auto', touchAction: 'none' }} 
         />
       </div>
 
-      {/* SANDBOX */}
-      <div style={{ background: '#16161a', padding: '25px', borderRadius: '8px', border: '1px solid #333' }}>
-        <h3>Hero Fusion Core Sandbox</h3>
-        <div style={{ display: 'flex', gap: '15px', margin: '15px 0' }}>
-          <select value={fusionParentA} onChange={(e) => setFusionParentA(e.target.value)} style={{ background: '#222', color: '#fff', padding: '8px', borderRadius: '4px', border: '1px solid #444', flex: 1 }}>
-            {HERO_DATABASE.map(h => <option key={h.id} value={h.id}>Agent A: {h.name}</option>)}
-          </select>
-          <select value={fusionParentB} onChange={(e) => setFusionParentB(e.target.value)} style={{ background: '#222', color: '#fff', padding: '8px', borderRadius: '4px', border: '1px solid #444', flex: 1 }}>
-            {HERO_DATABASE.map(h => <option key={h.id} value={h.id}>Agent B: {h.name}</option>)}
-          </select>
+      {/* DYNAMIC FUSION CORE SANDBOX */}
+      <div style={{ background: '#16161a', padding: '25px', borderRadius: '8px', border: '1px solid #333', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+        <div>
+          <h3 style={{ marginTop: 0, color: '#646cff' }}>Hero Fusion Core Sandbox</h3>
+          <p style={{ color: '#888', fontSize: '0.85rem' }}>Select two character profiles below to synthesize their matrix stats into a combined core prototype:</p>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', margin: '15px 0' }}>
+            <select value={fusionParentA} onChange={(e) => setFusionParentA(e.target.value)} style={{ background: '#222', color: '#fff', padding: '10px', borderRadius: '4px', border: '1px solid #444', cursor: 'pointer' }}>
+              {HERO_DATABASE.map(h => <option key={h.id} value={h.id}>Agent Alpha: {h.name}</option>)}
+            </select>
+            <select value={fusionParentB} onChange={(e) => setFusionParentB(e.target.value)} style={{ background: '#222', color: '#fff', padding: '10px', borderRadius: '4px', border: '1px solid #444', cursor: 'pointer' }}>
+              {HERO_DATABASE.map(h => <option key={h.id} value={h.id}>Agent Beta: {h.name}</option>)}
+            </select>
+          </div>
+
+          <div style={{ background: '#0f0f12', padding: '15px', borderRadius: '6px', border: '1px dashed #444' }}>
+            <h4 style={{ margin: '0 0 10px 0', color: '#646cff', fontSize: '1.1rem' }}>⚡ Core Matrix: {calculateFusion().name}</h4>
+            <p style={{ margin: '6px 0', fontSize: '0.9rem' }}><strong>Vitality Rating (HP):</strong> {calculateFusion().health}</p>
+            <p style={{ margin: '6px 0', fontSize: '0.9rem' }}><strong>Velocity Index (Speed):</strong> {calculateFusion().speed} units/sec</p>
+            <p style={{ margin: '6px 0', fontSize: '0.9rem', color: '#ff9800' }}><strong>Synthesized Ability:</strong> {calculateFusion().ability}</p>
+          </div>
+        </div>
+
+        {/* HIGH-LEVEL PARTICLE ACCELERATOR REACTOR CANVAS CONTAINER */}
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f0f12', borderRadius: '6px', border: '1px solid #333', padding: '10px' }}>
+          <span style={{ fontSize: '0.75rem', fontWeight: 'bold', color: '#666', marginBottom: '8px', letterSpacing: '1px' }}>CORE DATA FUSION REACTOR VISUALIZER</span>
+          <canvas ref={reactorCanvasRef} width={300} height={180} style={{ background: '#0b0b0d', border: '1px solid #222', borderRadius: '4px' }} />
         </div>
       </div>
 
