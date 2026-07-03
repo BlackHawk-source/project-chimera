@@ -1,3 +1,4 @@
+
 import React, { useRef, useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 
@@ -18,27 +19,22 @@ export default function TacticalMap() {
   const canvasRef = useRef(null);
   const animationRef = useRef(null);
   
-  // Feature State Management
   const [markers, setMarkers] = useState([]);
   const [lines, setLines] = useState([]); 
   const [currentLine, setCurrentLine] = useState([]); 
   const [selectedHero, setSelectedHero] = useState(HERO_DATABASE[0]);
   const [activeTheater, setActiveTheater] = useState(THEATER_MAPS[0]);
   
-  // Mode Matrix
   const [toolMode, setToolMode] = useState('node'); 
   const [isDragging, setIsDragging] = useState(false);
   const [draggedNodeId, setDraggedNodeId] = useState(null);
 
-  // Playback Animation Simulation State
   const [isSimulating, setIsSimulating] = useState(false);
   const [simProgress, setSimProgress] = useState(0);
 
-  // Analytics Layer
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [globalHeatmapPoints, setGlobalHeatmapPoints] = useState([]);
 
-  // Fusion Sandbox State
   const [fusionParentA, setFusionParentA] = useState('vanguard');
   const [fusionParentB, setFusionParentB] = useState('phantom');
 
@@ -218,14 +214,24 @@ export default function TacticalMap() {
     });
   };
 
+  // FIX: Robust native coordinate tracker that accurately extracts desktop client OR mobile finger bounds
   const getCanvasCoords = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    return { x: Math.round(e.clientX - rect.left), y: Math.round(e.clientY - rect.top) };
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    
+    // Abstract client position based on whether it is a touch event or standard click
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    return {
+      x: Math.round(clientX - rect.left),
+      y: Math.round(clientY - rect.top)
+    };
   };
 
-  const handleMouseDown = async (e) => {
+  const handleStartAction = async (coords) => {
     if (isSimulating) return;
-    const coords = getCanvasCoords(e);
 
     if (toolMode === 'draw') {
       setIsDragging(true);
@@ -248,9 +254,8 @@ export default function TacticalMap() {
     }
   };
 
-  const handleMouseMove = async (e) => {
+  const handleMoveAction = async (coords) => {
     if (!isDragging) return;
-    const coords = getCanvasCoords(e);
     if (toolMode === 'draw') {
       setCurrentLine([...currentLine, coords]);
     } else if (draggedNodeId) {
@@ -259,7 +264,7 @@ export default function TacticalMap() {
     }
   };
   
-  const handleMouseUp = async () => {
+  const handleEndAction = async () => {
     if (!isDragging) return;
     if (toolMode === 'draw') {
       if (currentLine.length > 1) {
@@ -342,28 +347,28 @@ export default function TacticalMap() {
           ))}
         </div>
 
+        {/* Master Cross-Platform Event Interface */}
         <canvas 
           ref={canvasRef} 
           width={600} 
           height={350} 
-          onMouseDown={handleMouseDown} 
-          onMouseMove={handleMouseMove} 
-          onMouseUp={handleMouseUp} 
-          onMouseLeave={handleMouseUp}
+          
+          onMouseDown={(e) => handleStartAction(getCanvasCoords(e))} 
+          onMouseMove={(e) => handleMoveAction(getCanvasCoords(e))} 
+          onMouseUp={handleEndAction} 
+          onMouseLeave={handleEndAction}
           
           onTouchStart={(e) => {
             e.preventDefault(); 
-            const touch = e.touches[0];
-            handleMouseDown({ clientX: touch.clientX, clientY: touch.clientY });
+            handleStartAction(getCanvasCoords(e));
           }}
           onTouchMove={(e) => {
             e.preventDefault();
-            const touch = e.touches[0];
-            handleMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
+            handleMoveAction(getCanvasCoords(e));
           }}
           onTouchEnd={(e) => {
             e.preventDefault();
-            handleMouseUp();
+            handleEndAction();
           }}
           
           style={{ 
