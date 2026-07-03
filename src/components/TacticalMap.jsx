@@ -34,8 +34,9 @@ export default function TacticalMap() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [simProgress, setSimProgress] = useState(0);
 
-  // Analytics Layer: Heatmap Visibility Flag
+  // Analytics Layer: Cross-Session Global Heatmap Points array
   const [showHeatmap, setShowHeatmap] = useState(false);
+  const [globalHeatmapPoints, setGlobalHeatmapPoints] = useState([]);
 
   // Fusion Sandbox State
   const [fusionParentA, setFusionParentA] = useState('vanguard');
@@ -44,6 +45,7 @@ export default function TacticalMap() {
   // Hook 1: Fetch baseline saved snapshots from Postgres tables on load
   useEffect(() => {
     fetchCloudData();
+    if (showHeatmap) fetchGlobalAnalytics();
     cancelAnimationFrame(animationRef.current);
     setIsSimulating(false);
     setSimProgress(0);
@@ -52,7 +54,7 @@ export default function TacticalMap() {
   // Hook 2: Redraw canvas whenever state modifications occur
   useEffect(() => {
     drawCanvasMatrix();
-  }, [markers, lines, currentLine, activeTheater, isSimulating, simProgress, showHeatmap]);
+  }, [markers, lines, currentLine, activeTheater, isSimulating, simProgress, showHeatmap, globalHeatmapPoints]);
 
   // Hook 3: Run the continuous route simulation playback loop
   useEffect(() => {
@@ -88,7 +90,9 @@ export default function TacticalMap() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tactical_paths' }, (payload) => {
         if (payload.eventType === 'INSERT' && payload.new.theater_id === activeTheater.id) {
-          const incomingLine = { id: payload.new.id, points: payload.new.points };
+          // FIX 2: Explicit Manual Serialization Translation (Parsing text string back into multi-dimensional matrix)
+          const parsedPoints = typeof payload.new.points === 'string' ? JSON.parse(payload.new.points) : payload.new.points;
+          const incomingLine = { id: payload.new.id, points: parsedPoints };
           setLines((prev) => prev.some(l => l.id === incomingLine.id) ? prev : [...prev, incomingLine]);
         } else if (payload.eventType === 'DELETE') {
           setLines([]);
@@ -101,6 +105,13 @@ export default function TacticalMap() {
     };
   }, [activeTheater]);
 
+  // Hook 5: Fetch global heatmap metrics when turned on
+  useEffect(() => {
+    if (showHeatmap) {
+      fetchGlobalAnalytics();
+    }
+  }, [showHeatmap, activeTheater]);
+
   const fetchCloudData = async () => {
     const nodeRes = await supabase.from('tactical_nodes').select('*').eq('theater_id', activeTheater.id);
     if (nodeRes.data) {
@@ -111,8 +122,22 @@ export default function TacticalMap() {
 
     const pathRes = await supabase.from('tactical_paths').select('*').eq('theater_id', activeTheater.id);
     if (pathRes.data) {
-      setLines(pathRes.data.map(row => ({ id: row.id, points: row.points })));
+      setLines(pathRes.data.map(row => {
+        // FIX 2: Explicit manual fallback parse
+        const pointsArray = typeof row.points === 'string' ? JSON.parse(row.points) : row.points;
+        return { id: row.id, points: pointsArray };
+      }));
     }
+  };
+
+  // FIX 1: Fetch from global analytics table spanning ALL history & sessions
+  const fetchGlobalAnalytics = async () => {
+    const { data, error } = await supabase
+      .from('global_analytics_logs')
+      .select('x, y')
+      .eq('theater_id', activeTheater.id);
+    
+    if (data) setGlobalHeatmapPoints(data);
   };
 
   const getXYAtProgress = (points, progress) => {
@@ -145,35 +170,20 @@ export default function TacticalMap() {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
     }
 
-    // --- RENDER LOW-LEVEL ANALYTICS HEATMAP ---
+    // --- RENDER LOW-LEVEL GLOBAL HEATMAP ---
     if (showHeatmap) {
       ctx.save();
-      // Use additive screen blending so overlapping radial points intensify in brightness
       ctx.globalCompositeOperation = 'screen';
       
-      markers.forEach((marker) => {
-        const gradient = ctx.createRadialGradient(marker.x, marker.y, 2, marker.x, marker.y, 45);
-        gradient.addColorStop(0, 'rgba(255, 0, 0, 0.5)');   // Hot core (Red)
-        gradient.addColorStop(0.4, 'rgba(255, 165, 0, 0.2)'); // Mid boundary (Orange)
-        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');        // Dissolve edge
+      // FIX 1: Render utilizing the Cross-Session historical database arrays
+      globalHeatmapPoints.forEach((pt) => {
+        const gradient = ctx.createRadialGradient(pt.x, pt.y, 2, pt.x, pt.y, 40);
+        gradient.addColorStop(0, 'rgba(255, 30, 30, 0.6)');   
+        gradient.addColorStop(0.5, 'rgba(255, 140, 0, 0.25)'); 
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');        
         
         ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(marker.x, marker.y, 45, 0, 2 * Math.PI);
-        ctx.fill();
-      });
-
-      lines.forEach((line) => {
-        if (!line.points) return;
-        line.points.forEach((point) => {
-          const gradient = ctx.createRadialGradient(point.x, point.y, 1, point.x, point.y, 20);
-          gradient.addColorStop(0, 'rgba(255, 60, 0, 0.15)');
-          gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-          ctx.fillStyle = gradient;
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, 20, 0, 2 * Math.PI);
-          ctx.fill();
-        });
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, 40, 0, 2 * Math.PI); ctx.fill();
       });
       ctx.restore();
     }
@@ -191,24 +201,39 @@ export default function TacticalMap() {
     if (currentLine.length > 0) drawPath(currentLine, '#ff3333');
     ctx.shadowBlur = 0; 
 
+    // Find animated trajectory coordinates for active hero node traversal simulation
+    let dynamicMovingHeroPos = null;
     if (isSimulating && lines.length > 0) {
       const activePathPoints = lines[lines.length - 1].points;
-      const currentPos = getXYAtProgress(activePathPoints, simProgress);
-      if (currentPos) {
-        ctx.fillStyle = selectedHero.iconColor; ctx.shadowBlur = 20; ctx.shadowColor = selectedHero.iconColor;
-        ctx.beginPath(); ctx.arc(currentPos.x, currentPos.y, 12, 0, 2 * Math.PI); ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.shadowBlur = 0; ctx.fillStyle = '#fff'; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText("SIM", currentPos.x, currentPos.y + 3);
-      }
+      dynamicMovingHeroPos = getXYAtProgress(activePathPoints, simProgress);
     }
 
+    // Draw Hero markers
     markers.forEach((marker) => {
+      // FIX 3: Check if this specific agent node is the one undergoing route simulation traversal
+      const isThisHeroSimulating = isSimulating && marker.heroName === selectedHero.name;
+      const renderX = isThisHeroSimulating && dynamicMovingHeroPos ? dynamicMovingHeroPos.x : marker.x;
+      const renderY = isThisHeroSimulating && dynamicMovingHeroPos ? dynamicMovingHeroPos.y : marker.y;
+
       ctx.fillStyle = marker.color;
-      ctx.shadowBlur = 12; ctx.shadowColor = marker.color;
-      ctx.beginPath(); ctx.arc(marker.x, marker.y, 10, 0, 2 * Math.PI); ctx.fill();
-      ctx.shadowBlur = 0; ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText((marker.heroName || '??').substring(0, 2).toUpperCase(), marker.x, marker.y + 3);
+      ctx.shadowBlur = isThisHeroSimulating ? 24 : 12; 
+      ctx.shadowColor = marker.color;
+      
+      ctx.beginPath(); 
+      ctx.arc(renderX, renderY, isThisHeroSimulating ? 13 : 10, 0, 2 * Math.PI); 
+      ctx.fill();
+      
+      if (isThisHeroSimulating) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      ctx.shadowBlur = 0; 
+      ctx.fillStyle = isThisHeroSimulating ? '#000' : '#fff';
+      ctx.font = 'bold 9px sans-serif'; 
+      ctx.textAlign = 'center';
+      ctx.fillText(marker.heroName.substring(0, 2).toUpperCase(), renderX, renderY + 3);
     });
   };
 
@@ -230,10 +255,16 @@ export default function TacticalMap() {
         setIsDragging(true);
         setDraggedNodeId(clickedNode.id);
       } else {
+        // Log to Active Session Table
         const newNodeData = { x: coords.x, y: coords.y, hero_name: selectedHero.name, color: selectedHero.iconColor, theater_id: activeTheater.id };
         const { data } = await supabase.from('tactical_nodes').insert([newNodeData]).select();
+        
+        // FIX 1: Record permanently to Global Cross-Session Analytics table
+        await supabase.from('global_analytics_logs').insert([{ theater_id: activeTheater.id, x: coords.x, y: coords.y }]);
+
         if (data) {
           setMarkers([...markers, { id: data[0].id, x: data[0].x, y: data[0].y, heroName: data[0].hero_name, color: data[0].color }]);
+          if (showHeatmap) fetchGlobalAnalytics();
         }
       }
     }
@@ -254,8 +285,18 @@ export default function TacticalMap() {
     if (!isDragging) return;
     if (toolMode === 'draw') {
       if (currentLine.length > 1) {
-        const { data } = await supabase.from('tactical_paths').insert([{ theater_id: activeTheater.id, points: currentLine }]).select();
-        if (data) setLines([...lines, { id: data[0].id, points: data[0].points }]);
+        // FIX 2: Explicit manual serialization translation via stringify onto standard serialization format
+        const serializedStringifiedPoints = JSON.stringify(currentLine);
+
+        const { data } = await supabase
+          .from('tactical_paths')
+          .insert([{ theater_id: activeTheater.id, points: serializedStringifiedPoints }])
+          .select();
+
+        if (data) {
+          const parsedPoints = typeof data[0].points === 'string' ? JSON.parse(data[0].points) : data[0].points;
+          setLines([...lines, { id: data[0].id, points: parsedPoints }]);
+        }
       }
       setCurrentLine([]);
     }
@@ -270,7 +311,16 @@ export default function TacticalMap() {
   };
 
   const startPlaybackSimulation = () => {
-    if (lines.length === 0) return;
+    // Ensure there is a path to trace, and that the chosen hero is currently placed on the grid map
+    const isHeroPlaced = markers.some(m => m.heroName === selectedHero.name);
+    if (lines.length === 0) {
+      alert("Please draw a path line first!");
+      return;
+    }
+    if (!isHeroPlaced) {
+      alert(`Place ${selectedHero.name} onto the canvas grid before initiating their route movement execution simulation!`);
+      return;
+    }
     setSimProgress(0); setIsSimulating(true);
   };
 
@@ -300,16 +350,11 @@ export default function TacticalMap() {
         </div>
 
         <div style={{ display: 'flex', gap: '10px' }}>
-          {/* ANALYTICS HEATMAP TOGGLE */}
-          <button 
-            onClick={() => setShowHeatmap(!showHeatmap)} 
-            style={{ background: showHeatmap ? '#e91e63' : '#222', color: '#fff', border: '1px solid #444', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-          >
-            📊 {showHeatmap ? 'Hide Heatmap Overlay' : 'Show Density Heatmap'}
+          <button onClick={() => setShowHeatmap(!showHeatmap)} style={{ background: showHeatmap ? '#e91e63' : '#222', color: '#fff', border: '1px solid #444', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+            📊 {showHeatmap ? 'Hide Global Analytics' : 'Show Global Heatmap'}
           </button>
-
           <button onClick={startPlaybackSimulation} disabled={isSimulating} style={{ background: isSimulating ? '#444' : '#4caf50', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: '4px', cursor: isSimulating ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
-            {isSimulating ? '⚡ Running Sim...' : '▶️ Run Route Simulation'}
+            {isSimulating ? '⚡ Moving...' : '▶️ Simulate Hero Movement'}
           </button>
           <button onClick={clearMap} style={{ background: '#ff3333', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Reset Grid</button>
         </div>
