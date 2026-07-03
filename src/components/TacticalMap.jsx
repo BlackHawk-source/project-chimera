@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
+import { supabase } from '../supabaseClient';
 
 // Centralized Mock Data
 const HERO_DATABASE = [
@@ -28,10 +29,35 @@ export default function TacticalMap() {
   const [fusionParentA, setFusionParentA] = useState('vanguard');
   const [fusionParentB, setFusionParentB] = useState('phantom');
 
-  // Trigger continuous re-drawing whenever state modifications occur
+  // Hook 1: Fetch saved nodes from the cloud when the app loads or map changes
+  useEffect(() => {
+    fetchCloudNodes();
+  }, [activeTheater]);
+
+  // Hook 2: Trigger continuous re-drawing onto HTML5 context whenever markers or theater updates
   useEffect(() => {
     drawCanvasMatrix();
   }, [markers, activeTheater]);
+
+  const fetchCloudNodes = async () => {
+    const { data, error } = await supabase
+      .from('tactical_nodes')
+      .select('*')
+      .eq('theater_id', activeTheater.id);
+
+    if (error) {
+      console.error('Error fetching data matrix:', error);
+    } else if (data) {
+      const formattedNodes = data.map(row => ({
+        id: row.id,
+        x: row.x,
+        y: row.y,
+        heroName: row.hero_name,
+        color: row.color
+      }));
+      setMarkers(formattedNodes);
+    }
+  };
 
   const drawCanvasMatrix = () => {
     const canvas = canvasRef.current;
@@ -67,7 +93,7 @@ export default function TacticalMap() {
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 9px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(marker.heroName.substring(0, 2).toUpperCase(), marker.x, marker.y + 3);
+      ctx.fillText((marker.heroName || '??').substring(0, 2).toUpperCase(), marker.x, marker.y + 3);
     });
   };
 
@@ -80,24 +106,39 @@ export default function TacticalMap() {
     };
   };
 
-  const handleMouseDown = (e) => {
+  const handleMouseDown = async (e) => {
     const coords = getCanvasCoords(e);
-    // Proximity check: did user click within 15px radius of a node?
     const clickedNode = markers.find(m => Math.hypot(m.x - coords.x, m.y - coords.y) < 15);
     
     if (clickedNode) {
       setIsDragging(true);
       setDraggedNodeId(clickedNode.id);
     } else {
-      // Place a fresh Node entry pinned to currently active Hero selection
-      const newNode = {
-        id: Date.now(),
+      const newNodeData = {
         x: coords.x,
         y: coords.y,
-        heroName: selectedHero.name,
-        color: selectedHero.iconColor
+        hero_name: selectedHero.name,
+        color: selectedHero.iconColor,
+        theater_id: activeTheater.id
       };
-      setMarkers([...markers, newNode]);
+
+      const { data, error } = await supabase
+        .from('tactical_nodes')
+        .insert([newNodeData])
+        .select();
+
+      if (error) {
+        console.error('Cloud upload fault:', error);
+      } else if (data) {
+        const addedNode = {
+          id: data[0].id,
+          x: data[0].x,
+          y: data[0].y,
+          heroName: data[0].hero_name,
+          color: data[0].color
+        };
+        setMarkers([...markers, addedNode]);
+      }
     }
   };
 
@@ -106,13 +147,37 @@ export default function TacticalMap() {
     const coords = getCanvasCoords(e);
     setMarkers(markers.map(m => m.id === draggedNodeId ? { ...m, x: coords.x, y: coords.y } : m));
   };
+  
+  const handleMouseUp = async () => {
+    if (isDragging && draggedNodeId) {
+      const finalNode = markers.find(m => m.id === draggedNodeId);
+      
+      if (finalNode) {
+        const { error } = await supabase
+          .from('tactical_nodes')
+          .update({ x: finalNode.x, y: finalNode.y })
+          .eq('id', draggedNodeId);
 
-  const handleMouseUp = () => {
+        if (error) console.error('Error saving dragged position:', error);
+      }
+    }
     setIsDragging(false);
     setDraggedNodeId(null);
   };
 
-  // Run Character Fusion Sandbox Engine Logic
+  const clearMap = async () => {
+    const { error } = await supabase
+      .from('tactical_nodes')
+      .delete()
+      .eq('theater_id', activeTheater.id);
+
+    if (error) {
+      console.error('Error flushing sector logs:', error);
+    } else {
+      setMarkers([]);
+    }
+  };
+
   const calculateFusion = () => {
     const pA = HERO_DATABASE.find(h => h.id === fusionParentA);
     const pB = HERO_DATABASE.find(h => h.id === fusionParentB);
@@ -136,12 +201,18 @@ export default function TacticalMap() {
           value={activeTheater.id} 
           onChange={(e) => {
             setActiveTheater(THEATER_MAPS.find(m => m.id === e.target.value));
-            setMarkers([]); // Clear matrix fields smoothly on landscape wipe
+            setMarkers([]);
           }}
           style={{ background: '#222', color: '#fff', padding: '6px', borderRadius: '4px', border: '1px solid #444' }}
         >
           {THEATER_MAPS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
         </select>
+        <button 
+          onClick={clearMap} 
+          style={{ float: 'right', background: '#ff3333', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+        >
+          Clear Grid
+        </button>
       </div>
 
       {/* CANVAS DRAWING SPACE & INTERACTION HOOKS */}
@@ -167,7 +238,7 @@ export default function TacticalMap() {
         <canvas 
           ref={canvasRef} width={600} height={350} 
           onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
-          style={{ border: '2px solid #444', borderRadius: '4px', cursor: isDragging ? 'grabbing' : 'crosshair' }}
+          style={{ border: '2px solid #444', borderRadius: '4px', cursor: isDragging ? 'grabbing' : 'crosshair', display: 'block', margin: '0 auto' }}
         />
 
         {/* SECTION 3: REAL-TIME VECTOR TRACKING LOG */}
